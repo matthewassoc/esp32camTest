@@ -79,3 +79,11 @@ void initializeBuffer(uint8_t *rx, size_t size)
         memset(rx, 0, size);
     }
 }
+
+void initializeBufferWithValue(uint8_t *rx, size_t size, uint8_t val)
+{
+    if (rx)
+    {
+        memset(rx, val, size);
+    }
+}

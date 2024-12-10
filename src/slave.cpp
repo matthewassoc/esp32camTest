@@ -8,11 +8,13 @@ void StreamVideo(WiFiClient &client);
 void slaveTask(void *params);
 
 ESP32SPISlave slave;
+SemaphoreHandle_t mutex;
+bool shared_can_write_to_stream_buf = true;
 
-static constexpr size_t BUFFER_SIZE = 32;
+static constexpr size_t BUFFER_SIZE = 64;
 static constexpr size_t QUEUE_SIZE = 500;
 
-uint8_t tx_buf[1] = {0};
+uint8_t tx_buf[BUFFER_SIZE] = {0};
 uint8_t rx_buf_1[BUFFER_SIZE] = {0};
 uint8_t rx_buf_2[BUFFER_SIZE] = {0};
 
@@ -29,6 +31,9 @@ uint8_t *receiveBuf2 = (uint8_t *)calloc(30000, sizeof(uint8_t));
 uint8_t *imageBuf = receiveBuf1;
 uint8_t *writeBuf = receiveBuf2;
 
+int64_t startTime;
+int64_t endTime;
+
 void setup()
 {
   esp_task_wdt_init(100, true); // 5 seconds timeout
@@ -43,8 +48,9 @@ void setup()
   // begin() after setting
   slave.begin(VSPI); // default: HSPI (please refer README for pin assignments)
 
+  mutex = xSemaphoreCreateMutex();
   xTaskCreatePinnedToCore(startCameraServer, "Producer", 16384, NULL, 1, NULL, 0);
-  xTaskCreatePinnedToCore(slaveTask, "SlaveBoi", 16384, NULL, 1, NULL, 0);
+  xTaskCreatePinnedToCore(slaveTask, "SlaveBoi", 16384, NULL, 1, NULL, 1);
 
   Serial.println("start spi slave");
 }
@@ -64,19 +70,25 @@ void slaveTask(void *params)
   {
     if (slave.hasTransactionsCompletedAndAllResultsHandled())
     {
-
-      // printf("ready to receive image size message\n");
+      unsigned int metadataLoop = 0;
       initializeBuffer(imageTransactionLengthBuf, BUFFER_SIZE);
-      while (imageTransactionLengthBuf[BUFFER_SIZE - 1] != 255)
+      initializeBufferWithValue(tx_buf, BUFFER_SIZE, 222);
+      // printf("ready to receive image size message\n");
+      while (imageTransactionLengthBuf[BUFFER_SIZE - 1] != 22 && imageTransactionLengthBuf[BUFFER_SIZE - 2] != 222)
       {
-        slave.transfer(tx_buf, imageTransactionLengthBuf, BUFFER_SIZE);
-        for (int k = 0; k < BUFFER_SIZE; k++)
+
+        if (metadataLoop % 10000 == 0)
         {
-          printf("%02X ", imageTransactionLengthBuf[k]);
+          printf("metadataLoop: %d\n", metadataLoop);
         }
-        printf("\n");
+        metadataLoop++;
+        slave.transfer(tx_buf, imageTransactionLengthBuf, BUFFER_SIZE);
+        // for (int k = 0; k < BUFFER_SIZE; k++)
+        // {
+        //   printf("%02X ", imageTransactionLengthBuf[k]);
+        // }
+        // printf("\n");
       }
-      slave.transfer(imageTransactionLengthBuf, emptyBuf, BUFFER_SIZE);
       transactionsToQueue = 0;
       incomingImageLen = 0;
       // for (int k = 0; k < BUFFER_SIZE; k++)
@@ -94,11 +106,10 @@ void slaveTask(void *params)
       transactionsToQueue |= (imageTransactionLengthBuf[6] << (8 * 1)) & 0xff00;
       transactionsToQueue |= imageTransactionLengthBuf[7] << (8 * 0);
 
-      printf("incoming image len: %d\n", incomingImageLen);
       if (transactionsToQueue > 0 && transactionsToQueue < 2000)
       {
-        printf("initializing %d transactions\n", transactionsToQueue);
-        if (imageBuf == receiveBuf1)
+
+        if (imageBuf == receiveBuf1 && shared_can_write_to_stream_buf)
         {
           writeBuf = receiveBuf2;
         }
@@ -113,10 +124,12 @@ void slaveTask(void *params)
 
         // finally, we should trigger transaction in the background
         slave.trigger();
+        startTime = esp_timer_get_time();
+        printf("initialized %d transactions. Len: %d\n", transactionsToQueue, incomingImageLen);
       }
       else
       {
-        printf("Did not queue\n");
+        printf("Did not queue %d, got len %d\n", transactionsToQueue, incomingImageLen);
       }
     }
 
@@ -125,7 +138,8 @@ void slaveTask(void *params)
     // if all transactions are completed and all results are ready, handle results
     if (slave.hasTransactionsCompletedAndAllResultsReady(transactionsToQueue))
     {
-      printf("transaction complete\n");
+      endTime = esp_timer_get_time();
+      printf("transaction complete, %d bytes in %d ms \n", incomingImageLen, (endTime - startTime) / 1000); // time is in microseconds, get to milliseconds
       imageBuf = writeBuf;
       // get received bytes for all transactions
       const std::vector<size_t> received_bytes = slave.numBytesReceivedAll();
@@ -241,6 +255,6 @@ void StreamVideo(WiFiClient &client)
     client.println();
 
     // Delay between frames
-    delay(5000);
+    delay(300);
   }
 }
